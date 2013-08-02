@@ -2,16 +2,18 @@ package main
  
 import (
     "fmt"
+    "errors"
+    "net/url"
     "encoding/base64"
 //    "encoding/hex"
     "path/filepath"
     "flag"
-//    "errors"
     "net/http"
     "io/ioutil"
     "os"
     "io"
 //    "bytes"
+    "strings"
     "crypto"
     "crypto/rand"
     "crypto/rsa"
@@ -31,66 +33,119 @@ var introduce =  flag.Bool("i", false, "Introduce myself to the hash repository"
 var asrtstr = flag.String("a", "none", "Comma separated ssertions about the file")
 
 
-func main() {
+func sha256base64( item []byte ) (string, []byte) {
+
+      phash := sha256.New224()
+      io.WriteString(phash,string(item))
+      phashbytes:=phash.Sum(nil)
+      return base64.StdEncoding.EncodeToString(phashbytes), phashbytes
+}
+
+func sign64(rsakey *rsa.PrivateKey, item []byte)(string, []byte){
+
+	hashFunc := crypto.SHA1
+	h := hashFunc.New()
+	h.Write(item)
+	digest := h.Sum(nil)
+	signresult, _ :=  rsa.SignPKCS1v15(rand.Reader, rsakey, hashFunc, digest)
+	return base64.StdEncoding.EncodeToString(signresult), signresult
+}
+
+
+func getPKI() (*rsa.PrivateKey, []byte, error){
+
+  rsa_file:=fmt.Sprintf("%s/.ssh/rputn_rsa",os.Getenv("HOME"))
+  rsapub_file:=fmt.Sprintf("%s/.ssh/rputn_rsa.pub",os.Getenv("HOME"))
+
+  _, err := os.Stat(rsa_file)
+  if err == nil {
+    _, err = os.Stat(rsapub_file)
+  }
+  if err != nil {
+    return nil, nil, errors.New("Please generate a reputation public/private key pair, e.g.:\n#ssh-keygen -t rsa -C \"<username>@<hostname>\" -f ~/.ssh/rputn_dsa\n")
+  }
+
+  rputn_rsa, _ := ioutil.ReadFile(rsa_file)
+  rputn_rsa_pub, _ := ioutil.ReadFile(rsapub_file)
+  block, _ := pem.Decode(rputn_rsa)
+  rsakey, _ := x509.ParsePKCS1PrivateKey(block.Bytes)
+
+  return rsakey, rputn_rsa_pub, nil
+}
+
+func escapeSpaces(in []byte)[]byte{
+    return []byte(strings.Replace(string(in), " ", "!", -1))
+}
+
+func unEscapeSpaces(in []byte)[]byte{
+    return []byte(strings.Replace(string(in), "!", " ", -1))
+}
+
+func processFiles() error {
 
   flag.Parse()
 
   if *asrtstr == "none" && *query == false && *introduce == false{
-	fmt.Println("command must include a query (-q) or an assertion (-a) or an introduction (-i)")
+    return errors.New("command must include a query (-q) or an assertion (-a) or an introduction (-i)")
+  }
+
+  if *asrtstr != "none" && ( *query || *introduce) {
+    return errors.New("command must only be a query (-q) or an assertion (-a) or an introduction (-i)")
+  }
+
+  rsakey, rputn_rsa_pub, err := getPKI()
+  if err != nil {
+    return err
+  }
+
+  phstr, _ := sha256base64( rputn_rsa_pub )
+
+  hloc := ""
+
+
+  if *introduce {
+        hloc = fmt.Sprintf("http://%s:%d/i?%s&%s",*hashrepo,*hashport,phstr,url.QueryEscape(string(rputn_rsa_pub)))
+        _ , _ = doRequest( hloc )
   }else{
-   if *asrtstr != "none" && ( *query || *introduce) {
-	fmt.Println("command must only be a query (-q) or an assertion (-a) or an introduction (-i)")
-   }else{
 
-
-
-
-    rsa_file:=fmt.Sprintf("%s/.ssh/rputn_rsa",os.Getenv("HOME"))
-    rsapub_file:=fmt.Sprintf("%s/.ssh/rputn_rsa.pub",os.Getenv("HOME"))
-    if _, err := os.Stat(rsa_file); err == nil {
-     if _, err := os.Stat(rsapub_file); err == nil {
-
-      rputn_rsa, _ := ioutil.ReadFile(rsa_file)
-      rputn_rsa_pub, _ := ioutil.ReadFile(rsapub_file)
-      block, _ := pem.Decode(rputn_rsa)
-      rsakey, _ := x509.ParsePKCS1PrivateKey(block.Bytes)
-
-      phash := sha256.New224()
-      io.WriteString(phash,string(rputn_rsa_pub))
-      phashbytes:=phash.Sum(nil)
-      phstr := base64.StdEncoding.EncodeToString(phashbytes)
-
-      files, _ := filepath.Glob(*hashfiles)
-      for _, f:= range files{
+    files, _ := filepath.Glob(*hashfiles)
+    for _, f:= range files{
         if *verbose {
   	  fmt.Printf("Hashing: %s : ",f)
         }
 
-        fhash := sha256.New224()
-        fbytes, _ := ioutil.ReadFile(f)
-        io.WriteString(fhash,string(fbytes))
-	fhashbytes:=fhash.Sum(nil)
-        fhstr := base64.StdEncoding.EncodeToString(fhashbytes)
+        fhstr, fhbytes := sha256base64( []byte(f) )
 
-	
-	hashFunc := crypto.SHA1
-	h := hashFunc.New()
-	h.Write(fhashbytes)
-	h.Write([]byte(*asrtstr))
-	digest := h.Sum(nil)
-	signresult, _ :=  rsa.SignPKCS1v15(rand.Reader, rsakey, hashFunc, digest)
-        signresultstr := base64.StdEncoding.EncodeToString(signresult)
 
-        hloc := ""
+
 	if *query {
           hloc = fmt.Sprintf("http://%s:%d/q?%s",*hashrepo,*hashport,fhstr)
-	}else{
-	  if *introduce {
-            hloc = fmt.Sprintf("http://%s:%d/i?%s",*hashrepo,*hashport,"INTRODUCING!")
-	  }else{
-            hloc = fmt.Sprintf("http://%s:%d/a?%s&%s&%s",*hashrepo,*hashport,fhstr,*asrtstr,signresultstr)
-	  }
 	}
+
+	if *introduce {
+          hloc = fmt.Sprintf("http://%s:%d/i?%s&%s",*hashrepo,*hashport,phstr,url.QueryEscape(string(rputn_rsa_pub)))
+	}
+
+        if  *asrtstr != "none" {
+	  combinedBytes:= append(fhbytes, *asrtstr...)
+	  signresultstr, _ := sign64(rsakey, combinedBytes)
+
+	  if 1==2{
+            hloc = fmt.Sprintf("http://%s:%d/a?%s&%s&%s&%s",*hashrepo,*hashport,fhstr,phstr,*asrtstr,signresultstr)
+	  }
+          hloc = fmt.Sprintf("http://%s:%d/a?%s&%s&%s&%s",*hashrepo,*hashport,fhstr,phstr,*asrtstr,"x")
+	}
+	
+
+        _, _ = doRequest( hloc )
+    }
+  }
+  return nil
+}
+
+func doRequest(hloc string)(string,error){
+
+	rval:=""
         response, err := http.Get(hloc)
         if err != nil {
             fmt.Printf("%s", err)
@@ -103,15 +158,18 @@ func main() {
                 os.Exit(1)
             }
             fmt.Printf("%s\n", string(contents))
+	    rval=string(contents)
         }
-      }
 
-     }else{
-       fmt.Printf("Please generate a reputation public/private key pair, e.g.:\n#ssh-keygen -t rsa -C \"<username>@<hostname>\" -f ~/.ssh/rputn_dsa\n")
-     }
-    }else{
-      fmt.Printf("Please generate a reputation public/private key pair, e.g.:\n#ssh-keygen -t rsa -C \"<username>@<hostname>\" -f ~/.ssh/rputn_dsa\n")
-    }
-   }
+	return rval,err
+}
+
+
+
+
+func main() {
+  err := processFiles()
+  if err != nil{
+     fmt.Println("%s",err)
   }
 }

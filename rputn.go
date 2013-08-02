@@ -43,7 +43,6 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/pem"
-	"strings"
 )
 
 var hashrepo = flag.String("h", "rputbl.com", "The hash repository address")
